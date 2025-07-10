@@ -18,7 +18,6 @@ class QwenHandler(BaseHandler):
         self.manifest = ctx.manifest
         properties = ctx.system_properties
 
-        # Load the model and tokenizer
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.processor = AutoProcessor.from_pretrained("qwen2_5_vl_7b_instruct_q4")
         self.model = AutoModelForImageTextToText.from_pretrained("qwen2_5_vl_7b_instruct_q4")
@@ -30,74 +29,110 @@ class QwenHandler(BaseHandler):
         preprocessed_data = []
         for req in requests:
             data = req.get("body") or req.get("data")
-            image_bytes = None
+            image_bytes_list = []
             prompt = ""
             sys_prompt = "You are a helpful assistant."
+            
+            # Flag to indicate if images were found in this request
+            has_images = False 
 
             if isinstance(data, dict):
-                image_bytes = data.get("image")
+                image_bytes_list = data.get("images", [])
                 prompt = data.get("prompt", "")
                 sys_prompt = data.get("sys_prompt", sys_prompt)
             elif isinstance(data, (bytes, bytearray)):
                 try:
                     parsed_data = json.loads(data.decode('utf-8'))
-                    image_bytes = parsed_data.get("image_bytes")
+                    image_bytes_list = parsed_data.get("images", [])
                     prompt = parsed_data.get("prompt", "")
                     sys_prompt = parsed_data.get("sys_prompt", sys_prompt)
-                    if image_bytes:
-                        image_bytes = base64.b64decode(image_bytes)
+                    if image_bytes_list:
+                        image_bytes_list = [base64.b64decode(img_b) for img_b in image_bytes_list if isinstance(img_b, str)]
                 except json.JSONDecodeError:
-                    image_bytes = data
+                    # If it's raw bytes and not JSON, treat it as a single image
+                    image_bytes_list = [data]
                     prompt = req.get("headers", {}).get("X-Prompt", "")
                     sys_prompt = req.get("headers", {}).get("X-Sys-Prompt", sys_prompt)
             else:
                 raise ValueError("Unsupported input data format in preprocess.")
 
-            image = None
-            if image_bytes:
-                try:
-                    if isinstance(image_bytes, bytes):
-                        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-                    elif isinstance(image_bytes, str):
-                        if ',' in image_bytes:
-                            image_bytes = image_bytes.split(',')[1]
-                        image = Image.open(BytesIO(base64.b64decode(image_bytes))).convert("RGB")
-                except Exception as e:
-                    raise RuntimeError(f"Error opening image: {e}")
+            image_paths = []
+            cleanup_paths = []
 
-            if image is None:
-                raise ValueError("Image data is missing or invalid.")
+            # Only process images if image_bytes_list is not empty
+            if image_bytes_list:
+                for img_bytes in image_bytes_list:
+                    image = None
+                    try:
+                        if isinstance(img_bytes, bytes):
+                            image = Image.open(BytesIO(img_bytes)).convert("RGB")
+                        elif isinstance(img_bytes, str):
+                            if ',' in img_bytes:
+                                img_bytes = img_bytes.split(',')[1]
+                            image = Image.open(BytesIO(base64.b64decode(img_bytes))).convert("RGB")
+                    except Exception as e:
+                        print(f"Warning: Error opening one of the images. Skipping this image. Error: {e}")
+                        continue
 
-            # Create a temporary file that will NOT be automatically deleted
-            # when the temp_file object is closed. We'll manage deletion manually.
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            image.save(temp_file.name) # Save the PIL image to the temporary file
-            temp_file.close() # Close the file handle (important for Windows where files can't be deleted while open)
+                    if image is not None:
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                        image.save(temp_file.name)
+                        temp_file.close()
+                        image_paths.append(temp_file.name)
+                        cleanup_paths.append(temp_file.name)
+                
+                if image_paths: # If at least one image was successfully processed
+                    has_images = True
             
-            # Store the path to the temporary file and the cleanup function
-            # This is a common pattern for handlers to track resources.
+            # If no prompt is provided, we can't do anything
+            if not prompt:
+                raise ValueError("Prompt is missing. Please provide a 'prompt' for the model.")
+
             preprocessed_data.append({
-                "image_path": temp_file.name,
+                "image_paths": image_paths, # Will be empty list if no images
                 "prompt": prompt,
                 "sys_prompt": sys_prompt,
-                "cleanup_path": temp_file.name # Store path for later deletion
+                "cleanup_paths": cleanup_paths,
+                "has_images": has_images # Pass this flag to _run_inference
             })
         return preprocessed_data
-    
-    def _run_inference(self, image_path, prompt, sys_prompt, max_new_tokens=1024):
-        # Assuming processor and model are loaded in self.initialize
-        image = Image.open(image_path)
-        image_local_path = "file://" + image_path
+
+    def _run_inference(self, image_paths, prompt, sys_prompt, has_images, max_new_tokens=1024):
+        # Construct messages based on whether images are present
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"image": image_local_path},
-            ]},
+            {"role": "user", "content": []}, # Initialize content as a list
         ]
+
+        # Add text prompt
+        messages[1]["content"].append({"type": "text", "text": prompt})
+
+        # Add images only if has_images is True and image_paths is not empty
+        images_for_processor = []
+        if has_images and image_paths:
+            for path in image_paths:
+                try:
+                    pil_image = Image.open(path).convert("RGB")
+                    images_for_processor.append(pil_image)
+                    messages[1]["content"].append({"image": "file://" + path})
+                except Exception as e:
+                    print(f"Warning: Error loading image from path {path} for inference. Skipping this image. Error: {e}")
+                    continue
+            
+            if not images_for_processor and has_images: # If images were expected but none loaded successfully
+                print("Warning: No valid images could be loaded for inference, proceeding as text-only.")
+                has_images = False # Override the flag if image loading failed
+
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
-        inputs = inputs.to('cuda' if torch.cuda.is_available() else 'cpu') # Use self.map_location here if you set it
+        
+        # Pass images to processor only if they exist
+        if has_images:
+            inputs = self.processor(text=[text], images=images_for_processor, padding=True, return_tensors="pt")
+        else:
+            # When no images, ensure 'images' argument is not passed or is an empty list
+            inputs = self.processor(text=[text], padding=True, return_tensors="pt") 
+            
+        inputs = inputs.to(self.device)
 
         output_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
         generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
@@ -109,22 +144,22 @@ class QwenHandler(BaseHandler):
         Main entry point for the handler.
         """
         results = []
-        cleanup_paths = [] # To store paths for cleanup
+        all_cleanup_paths = []
 
         try:
             preprocessed_requests = self.preprocess(data)
             for req_data in preprocessed_requests:
-                cleanup_paths.append(req_data["cleanup_path"]) # Add to cleanup list
+                all_cleanup_paths.extend(req_data["cleanup_paths"])
 
                 output_text = self._run_inference(
-                    image_path=req_data["image_path"],
+                    image_paths=req_data["image_paths"],
                     prompt=req_data["prompt"],
-                    sys_prompt=req_data["sys_prompt"]
+                    sys_prompt=req_data["sys_prompt"],
+                    has_images=req_data["has_images"] # Pass the flag
                 )
                 results.append({"output": output_text})
         finally:
-            # Ensure cleanup happens even if an error occurs during inference
-            for path in cleanup_paths:
+            for path in all_cleanup_paths:
                 try:
                     os.remove(path)
                     print(f"Cleaned up temporary file: {path}")
