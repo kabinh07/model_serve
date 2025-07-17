@@ -14,10 +14,10 @@ if [ -z $VERSION ];then
 fi
 echo "VERSION: ${VERSION}"
 # create mar
-docker run --rm \
--v ./:/home/model-server \
--v ./model_store:/model_store \
--v ./models/${MODEL}:/models \
+docker run --rm --shm-size 25gb \
+-v /mnt/data/github/model_serve/qwen/:/home/model-server \
+-v /mnt/data/github/model_serve/qwen/model_store:/model_store \
+-v /mnt/data/github/model_serve/qwen/models/${MODEL}:/models \
 --entrypoint /bin/bash \
 --workdir /home/model-server \
 $CONTAINER \
@@ -29,6 +29,5 @@ $CONTAINER \
 --handler handler.py \
 --requirements-file requirements.txt \
 ${EXTRA} \
---force \
-&& mv ${NAME}.mar /model_store/
+--force 
 "

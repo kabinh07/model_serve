@@ -32,6 +32,9 @@ class QwenHandler(BaseHandler):
             image_bytes_list = []
             prompt = ""
             sys_prompt = "You are a helpful assistant."
+            max_new_tokens = 1024 # Default value
+            max_pixels = None # Default to None, meaning processor's default
+            min_pixels = None # Default to None, meaning processor's default
             
             # Flag to indicate if images were found in this request
             has_images = False 
@@ -40,12 +43,21 @@ class QwenHandler(BaseHandler):
                 image_bytes_list = data.get("images", [])
                 prompt = data.get("prompt", "")
                 sys_prompt = data.get("sys_prompt", sys_prompt)
+                max_new_tokens = data.get("max_new_tokens", 1024)
+                # Retrieve max_pixels and min_pixels from input data
+                max_pixels = data.get("max_pixels", None)
+                min_pixels = data.get("min_pixels", None)
+                
             elif isinstance(data, (bytes, bytearray)):
                 try:
                     parsed_data = json.loads(data.decode('utf-8'))
                     image_bytes_list = parsed_data.get("images", [])
                     prompt = parsed_data.get("prompt", "")
                     sys_prompt = parsed_data.get("sys_prompt", sys_prompt)
+                    max_new_tokens = parsed_data.get("max_new_tokens", 1024)
+                    max_pixels = parsed_data.get("max_pixels", None)
+                    min_pixels = parsed_data.get("min_pixels", None)
+
                     if image_bytes_list:
                         image_bytes_list = [base64.b64decode(img_b) for img_b in image_bytes_list if isinstance(img_b, str)]
                 except json.JSONDecodeError:
@@ -53,6 +65,8 @@ class QwenHandler(BaseHandler):
                     image_bytes_list = [data]
                     prompt = req.get("headers", {}).get("X-Prompt", "")
                     sys_prompt = req.get("headers", {}).get("X-Sys-Prompt", sys_prompt)
+                    # Cannot get max_pixels/min_pixels from headers easily in this fallback
+                    # So they will remain their default None values
             else:
                 raise ValueError("Unsupported input data format in preprocess.")
 
@@ -93,11 +107,15 @@ class QwenHandler(BaseHandler):
                 "prompt": prompt,
                 "sys_prompt": sys_prompt,
                 "cleanup_paths": cleanup_paths,
-                "has_images": has_images # Pass this flag to _run_inference
+                "has_images": has_images, # Pass this flag to _run_inference
+                "max_new_tokens": max_new_tokens, # Pass max_new_tokens
+                "max_pixels": max_pixels,         # Pass max_pixels
+                "min_pixels": min_pixels          # Pass min_pixels
             })
         return preprocessed_data
-
-    def _run_inference(self, image_paths, prompt, sys_prompt, has_images, max_new_tokens=1024):
+    
+    # Add max_pixels and min_pixels as parameters to _run_inference
+    def _run_inference(self, image_paths, prompt, sys_prompt, has_images, max_new_tokens=1024, max_pixels=None, min_pixels=None):
         # Construct messages based on whether images are present
         messages = [
             {"role": "system", "content": sys_prompt},
@@ -125,12 +143,26 @@ class QwenHandler(BaseHandler):
 
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
-        # Pass images to processor only if they exist
+        # Prepare kwargs for the processor
+        processor_kwargs = {
+            "text": [text],
+            "padding": True,
+            "return_tensors": "pt"
+        }
+        
         if has_images:
-            inputs = self.processor(text=[text], images=images_for_processor, padding=True, return_tensors="pt")
+            processor_kwargs["images"] = images_for_processor
+            # Conditionally add max_pixels and min_pixels if they are not None
+            if max_pixels is not None:
+                processor_kwargs["max_pixels"] = max_pixels
+            if min_pixels is not None:
+                processor_kwargs["min_pixels"] = min_pixels
+            
+            print(f"\n>>>>>> Processing with images: {len(images_for_processor)} images, max_pixels={max_pixels}, min_pixels={min_pixels}\n")
+            inputs = self.processor(**processor_kwargs)
         else:
             # When no images, ensure 'images' argument is not passed or is an empty list
-            inputs = self.processor(text=[text], padding=True, return_tensors="pt") 
+            inputs = self.processor(**processor_kwargs)
             
         inputs = inputs.to(self.device)
 
@@ -155,7 +187,10 @@ class QwenHandler(BaseHandler):
                     image_paths=req_data["image_paths"],
                     prompt=req_data["prompt"],
                     sys_prompt=req_data["sys_prompt"],
-                    has_images=req_data["has_images"] # Pass the flag
+                    has_images=req_data["has_images"], # Pass the flag
+                    max_new_tokens=req_data["max_new_tokens"], # Pass max_new_tokens
+                    max_pixels=req_data["max_pixels"],         # Pass max_pixels
+                    min_pixels=req_data["min_pixels"]          # Pass min_pixels
                 )
                 results.append({"output": output_text})
         finally:
