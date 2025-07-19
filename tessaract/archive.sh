@@ -2,7 +2,7 @@
 set -e
 CONTAINER=pytorch/torchserve:latest-cpu
 MODEL=dummy_model.json
-NAME=tessaract
+NAME=tesseract
 VERSION=$3
 EXTRA=$4
 if [ $EXTRA ]; then
@@ -15,9 +15,9 @@ fi
 echo "VERSION: ${VERSION}"
 # create mar
 docker run --rm --shm-size 25gb \
--v /mnt/data/github/model_serve/tessaract/:/home/model-server \
--v /mnt/data/github/model_serve/tessaract/model_store:/model_store \
--v /mnt/data/github/model_serve/tessaract/models/:/models \
+-v /mnt/data/github/model_serve/tesseract/:/home/model-server \
+-v /mnt/data/github/model_serve/tesseract/model_store:/model_store \
+-v /mnt/data/github/model_serve/tesseract/models/:/models \
 --entrypoint /bin/bash \
 --workdir /home/model-server \
 $CONTAINER \
