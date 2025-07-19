@@ -1,3 +1,4 @@
 qwen/models/*
+tessaract/models/*
 *.mar
 *.png

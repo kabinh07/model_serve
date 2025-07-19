@@ -18,7 +18,7 @@ class QwenHandler(BaseHandler):
         self.manifest = ctx.manifest
         properties = ctx.system_properties
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.processor = AutoProcessor.from_pretrained("qwen2_5_vl_7b_instruct_q4")
         self.model = AutoModelForImageTextToText.from_pretrained("qwen2_5_vl_7b_instruct_q4")
         self.model.to(self.device)
