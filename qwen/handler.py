@@ -33,7 +33,7 @@ class QwenHandler(BaseHandler):
             prompt = ""
             sys_prompt = "You are a helpful assistant."
             max_new_tokens = 1024 # Default value
-            max_pixels = None # Default to None, meaning processor's default
+            max_pixels = 1210000 # Default to None, meaning processor's default
             min_pixels = None # Default to None, meaning processor's default
             
             # Flag to indicate if images were found in this request
@@ -45,8 +45,8 @@ class QwenHandler(BaseHandler):
                 sys_prompt = data.get("sys_prompt", sys_prompt)
                 max_new_tokens = data.get("max_new_tokens", 1024)
                 # Retrieve max_pixels and min_pixels from input data
-                max_pixels = data.get("max_pixels", None)
-                min_pixels = data.get("min_pixels", None)
+                max_pixels = data.get("max_pixels", max_pixels)
+                min_pixels = data.get("min_pixels", min_pixels)
                 
             elif isinstance(data, (bytes, bytearray)):
                 try:
@@ -55,8 +55,8 @@ class QwenHandler(BaseHandler):
                     prompt = parsed_data.get("prompt", "")
                     sys_prompt = parsed_data.get("sys_prompt", sys_prompt)
                     max_new_tokens = parsed_data.get("max_new_tokens", 1024)
-                    max_pixels = parsed_data.get("max_pixels", None)
-                    min_pixels = parsed_data.get("min_pixels", None)
+                    max_pixels = parsed_data.get("max_pixels", max_pixels)
+                    min_pixels = parsed_data.get("min_pixels", min_pixels)
 
                     if image_bytes_list:
                         image_bytes_list = [base64.b64decode(img_b) for img_b in image_bytes_list if isinstance(img_b, str)]
@@ -157,8 +157,6 @@ class QwenHandler(BaseHandler):
                 processor_kwargs["max_pixels"] = max_pixels
             if min_pixels is not None:
                 processor_kwargs["min_pixels"] = min_pixels
-            
-            print(f"\n>>>>>> Processing with images: {len(images_for_processor)} images, max_pixels={max_pixels}, min_pixels={min_pixels}\n")
             inputs = self.processor(**processor_kwargs)
         else:
             # When no images, ensure 'images' argument is not passed or is an empty list
