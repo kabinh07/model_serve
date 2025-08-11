@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 CONTAINER=pytorch/torchserve:latest-cpu
-MODEL=facenet.pt
+MODEL=facenet_weights.h5
 NAME=facenet
 VERSION=$3
 EXTRA=$4

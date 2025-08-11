@@ -1,6 +1,5 @@
 import os
 import warnings
-import logging
 from typing import Union, Any, Optional, Dict, Tuple, List
 
 # this has to be set before importing tf

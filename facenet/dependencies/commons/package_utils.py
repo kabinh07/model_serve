@@ -1,10 +1,31 @@
+# built-in dependencies
+import hashlib
+
 # 3rd party dependencies
 import tensorflow as tf
 
 
+def get_tf_major_version() -> int:
+    """
+    Find tensorflow's major version
+    Returns
+        major_version (int)
+    """
+    return int(tf.__version__.split(".", maxsplit=1)[0])
+
+
+def get_tf_minor_version() -> int:
+    """
+    Find tensorflow's minor version
+    Returns
+        minor_version (int)
+    """
+    return int(tf.__version__.split(".", maxsplit=-1)[1])
+
+
 def validate_for_keras3():
-    tf_major = int(tf.__version__.split(".", maxsplit=1)[0])
-    tf_minor = int(tf.__version__.split(".", maxsplit=-1)[1])
+    tf_major = get_tf_major_version()
+    tf_minor = get_tf_minor_version()
 
     # tf_keras is a must dependency after tf 2.16
     if tf_major == 1 or (tf_major == 2 and tf_minor < 16):
@@ -12,6 +33,7 @@ def validate_for_keras3():
 
     try:
         import tf_keras
+
     except ImportError as err:
         # you may consider to install that package here
         raise ValueError(
