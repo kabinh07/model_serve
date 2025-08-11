@@ -1,0 +1,9 @@
+opencv-python
+scipy
+pillow
+# numpy>=1.14.0
+gdown>=3.10.1
+# Pillow>=5.2.0
+# opencv-python>=3.4.4
+https://storage.googleapis.com/tensorflow/versions/2.19.0/tensorflow-2.19.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+tf-keras

@@ -4,3 +4,4 @@ text_detection_yolo/models/*
 *.pt
 *.mar
 *.png
+*.h5
