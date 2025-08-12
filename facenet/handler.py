@@ -71,7 +71,7 @@ class FaceNetTRTHandler(BaseHandler):
             with torch.no_grad():
                 # if image.shape != (160, 160, 3):
                 #     image = cv2.resize(image, (160, 160))
-                image = torch.tensor(image, dtype=torch.float32).unsqueeze(0).to(self.device)
+                image = torch.tensor(image.copy(), dtype=torch.float32).unsqueeze(0).to(self.device)
                 result = self.model(image)
                 output_tensor.append(result.cpu().numpy())
         return output_tensor
