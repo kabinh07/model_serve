@@ -1,0 +1,2 @@
+capybara_docsaid>=0.5.1
+opencv-python

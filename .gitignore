@@ -5,3 +5,4 @@ text_detection_yolo/models/*
 *.mar
 *.png
 *.h5
+*.onnx
