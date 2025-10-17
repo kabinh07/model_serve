@@ -32,33 +32,31 @@ class ModelHandler(BaseHandler):
         self.predictor = YOLO(os.path.join(model_dir, serialized_file))
         self.initialized = True
 
-    def inference(self, model_input):
-        predictions = self.predictor.predict(model_input, conf = 0.6, save =False, device=self.device)
+    def handle(self, data, context):
+        img, conf = self.preprocess(data)
+        result = self.inference(img, conf)
+        return self.postprocess(result)
+
+    def inference(self, model_input, conf):
+        predictions = self.predictor.predict(model_input, conf = conf, save =False, device=self.device)
         return predictions
 
     def preprocess(self, data):
         data = data[0].get("body") or data[0].get("data")
         img = data.get("img")
+        conf = data.get("conf", 0.5)
+        
+        self.y_thresh = data.get("y_thresh", 20)
+        self.x_gap_thresh = data.get("x_gap_thresh", 30)
+
         split = img.strip().split(',')
         if len(split) < 2:
             raise PredictionException("Invalid image", 513)
         img = Image.open(BytesIO(base64.b64decode(split[1]))).convert("RGB")
 
-        return img
+        return img, conf
     
-    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh=10, x_gap_thresh=30):
-        """
-        Merge only horizontally aligned and close boxes into one line box.
-        No vertical merging is performed.
-        
-        Args:
-            bboxes_xywh (Tensor): Tensor [N, 4] in xywh format.
-            y_thresh (float): max vertical distance between centers to be considered in same line.
-            x_gap_thresh (float): max horizontal gap between boxes to merge.
-        
-        Returns:
-            merged_boxes_xywh (Tensor): merged boxes in xywh format.
-        """
+    def merge_horizontally_aligned_boxes(self, bboxes_xywh):
         if len(bboxes_xywh) == 0:
             return torch.tensor([], dtype=bboxes_xywh.dtype, device=bboxes_xywh.device)
 
@@ -102,12 +100,12 @@ class ModelHandler(BaseHandler):
                     continue
                     
                 # Check if box is in same line using center distance
-                if abs(y_centers[j] - current_y) <= y_thresh:
+                if abs(y_centers[j] - current_y) <= self.y_thresh:
                     # Check horizontal gap with closest box in current line
                     gaps = [x1[j] - x2[k] for k in current_line]
                     min_gap = min(gaps)
                     
-                    if min_gap <= x_gap_thresh:
+                    if min_gap <= self.x_gap_thresh:
                         current_line.append(j)
                         used.add(j)
 
