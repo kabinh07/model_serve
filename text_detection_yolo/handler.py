@@ -5,7 +5,7 @@ from io import BytesIO
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from ts.torch_handler.base_handler import BaseHandler
@@ -38,6 +38,7 @@ class ModelHandler(BaseHandler):
         return self.postprocess(result)
 
     def inference(self, model_input, conf):
+        self.image = model_input
         predictions = self.predictor.predict(model_input, conf = conf, save =False, device=self.device)
         return predictions
 
@@ -45,10 +46,6 @@ class ModelHandler(BaseHandler):
         data = data[0].get("body") or data[0].get("data")
         img = data.get("img")
         conf = data.get("conf", 0.5)
-        
-        self.y_thresh = data.get("y_thresh", 20)
-        self.x_gap_thresh = data.get("x_gap_thresh", 30)
-
         split = img.strip().split(',')
         if len(split) < 2:
             raise PredictionException("Invalid image", 513)
@@ -56,7 +53,19 @@ class ModelHandler(BaseHandler):
 
         return img, conf
     
-    def merge_horizontally_aligned_boxes(self, bboxes_xywh):
+    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh=10, x_gap_thresh=30):
+        """
+        Merge only horizontally aligned and close boxes into one line box.
+        No vertical merging is performed.
+        
+        Args:
+            bboxes_xywh (Tensor): Tensor [N, 4] in xywh format.
+            y_thresh (float): max vertical distance between centers to be considered in same line.
+            x_gap_thresh (float): max horizontal gap between boxes to merge.
+        
+        Returns:
+            merged_boxes_xywh (Tensor): merged boxes in xywh format.
+        """
         if len(bboxes_xywh) == 0:
             return torch.tensor([], dtype=bboxes_xywh.dtype, device=bboxes_xywh.device)
 
@@ -100,12 +109,12 @@ class ModelHandler(BaseHandler):
                     continue
                     
                 # Check if box is in same line using center distance
-                if abs(y_centers[j] - current_y) <= self.y_thresh:
+                if abs(y_centers[j] - current_y) <= y_thresh:
                     # Check horizontal gap with closest box in current line
                     gaps = [x1[j] - x2[k] for k in current_line]
                     min_gap = min(gaps)
                     
-                    if min_gap <= self.x_gap_thresh:
+                    if min_gap <= x_gap_thresh:
                         current_line.append(j)
                         used.add(j)
 
@@ -139,13 +148,28 @@ class ModelHandler(BaseHandler):
         # Skip merging if no boxes detected
         if len(xywh) == 0:
             return [[{"horizontal_list": []}]]
-
+        
+        # Debug image save
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # xywh_np = xywh.cpu().numpy()
+        # for idx, box in enumerate(xywh_np):
+        #     x_center, y_center, w, h = box
+        #     xmin = int(x_center - w / 2)
+        #     ymin = int(y_center - h / 2)
+        #     xmax = int(x_center + w / 2)
+        #     ymax = int(y_center + h / 2)
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
+        # # img_copy.save("debug_before_merge.png")
+        
         # Merge horizontally aligned boxes
         grouped_bboxes = self.merge_horizontally_aligned_boxes(xywh.cpu())
 
         # Move to CPU and convert to numpy for final processing
         grouped_bboxes = grouped_bboxes.cpu().numpy()
-        
+
+        print(grouped_bboxes)
+
         # Convert grouped xywh to xmin, xmax, ymin, ymax
         x_center = grouped_bboxes[:, 0]
         y_center = grouped_bboxes[:, 1]
@@ -155,9 +179,17 @@ class ModelHandler(BaseHandler):
         # Calculate coordinates and convert to integers
         xmin = np.floor(x_center - w / 2).astype(np.int32)
         xmax = np.ceil(x_center + w / 2).astype(np.int32)
-        ymin = np.ceil(y_center - h / 2).astype(np.int32)+3
-        ymax = np.floor(y_center + h / 2).astype(np.int32)-3
+        ymin = np.ceil(y_center - h / 2).astype(np.int32)
+        ymax = np.floor(y_center + h / 2).astype(np.int32)
         
         # Stack in the required format
         bboxes = np.stack([xmin, xmax, ymin, ymax], axis=1)
+
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # for box in bboxes:
+        #     xmin, xmax, ymin, ymax = box
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
+        # img_copy.save("debug_after_merge.png")
+        
         return [[{"horizontal_list": bboxes.tolist()}]]
