@@ -149,7 +149,7 @@ class ModelHandler(BaseHandler):
         if len(xywh) == 0:
             return [[{"horizontal_list": []}]]
         
-        # Debug image save
+        # # Debug image save
         # img_copy = self.image.copy()
         # draw = ImageDraw.Draw(img_copy)
         # xywh_np = xywh.cpu().numpy()
@@ -160,7 +160,7 @@ class ModelHandler(BaseHandler):
         #     xmax = int(x_center + w / 2)
         #     ymax = int(y_center + h / 2)
         #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
-        # # img_copy.save("debug_before_merge.png")
+        # img_copy.save("debug_before_merge.png")
         
         # Merge horizontally aligned boxes
         grouped_bboxes = self.merge_horizontally_aligned_boxes(xywh.cpu())
@@ -168,7 +168,7 @@ class ModelHandler(BaseHandler):
         # Move to CPU and convert to numpy for final processing
         grouped_bboxes = grouped_bboxes.cpu().numpy()
 
-        print(grouped_bboxes)
+        # print(grouped_bboxes)
 
         # Convert grouped xywh to xmin, xmax, ymin, ymax
         x_center = grouped_bboxes[:, 0]
@@ -184,12 +184,44 @@ class ModelHandler(BaseHandler):
         
         # Stack in the required format
         bboxes = np.stack([xmin, xmax, ymin, ymax], axis=1)
+        
+        # Sort bboxes: first by y-coordinate (top to bottom), then by x-coordinate (left to right) within each row
+        # Sort by y first
+        bboxes = bboxes[np.argsort(bboxes[:, 2])]
+        
+        # Group by y-coordinate and sort each group by x-coordinate
+        y_thresh = 5  # threshold to consider boxes in the same row
+        sorted_bboxes = []
+        current_row = []
+        current_y = None
+        
+        for box in bboxes:
+            if current_y is None:
+                current_y = box[2]
+                current_row.append(box)
+            elif abs(box[2] - current_y) <= y_thresh:
+                current_row.append(box)
+            else:
+                # Sort current row by x-coordinate and add to result
+                current_row = sorted(current_row, key=lambda b: b[0])
+                sorted_bboxes.extend(current_row)
+                current_row = [box]
+                current_y = box[2]
+        
+        # Don't forget the last row
+        if current_row:
+            current_row = sorted(current_row, key=lambda b: b[0])
+            sorted_bboxes.extend(current_row)
+        
+        bboxes = np.array(sorted_bboxes)
 
         # img_copy = self.image.copy()
         # draw = ImageDraw.Draw(img_copy)
-        # for box in bboxes:
+        # for seq_num, box in enumerate(bboxes):
         #     xmin, xmax, ymin, ymax = box
         #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
+        #     # Draw sequence number at the top-left of the box
+        #     draw.text((xmin + 5, ymin + 5), str(seq_num), fill="yellow")
         # img_copy.save("debug_after_merge.png")
         
         return [[{"horizontal_list": bboxes.tolist()}]]
