@@ -53,7 +53,7 @@ class ModelHandler(BaseHandler):
 
         return img, conf
     
-    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh=10, x_gap_thresh=30):
+    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh=12, x_gap_thresh=30):
         """
         Merge only horizontally aligned and close boxes into one line box.
         No vertical merging is performed.
