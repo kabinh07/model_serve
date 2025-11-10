@@ -53,15 +53,17 @@ class ModelHandler(BaseHandler):
 
         return img, conf
     
-    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh=10, x_gap_thresh=30):
+    def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh_pct=0.3, horizontal_overlap_thresh=0.05, max_gap_pct=0.5):
         """
-        Merge only horizontally aligned and close boxes into one line box.
-        No vertical merging is performed.
+        Merge horizontally adjacent or overlapping boxes that are on the same line.
+        Each line of text should remain as a separate box.
+        Vertical merging is strictly prohibited.
         
         Args:
             bboxes_xywh (Tensor): Tensor [N, 4] in xywh format.
-            y_thresh (float): max vertical distance between centers to be considered in same line.
-            x_gap_thresh (float): max horizontal gap between boxes to merge.
+            y_thresh_pct (float): max vertical distance between centers as percentage of average height (e.g., 0.3 = 30%).
+            horizontal_overlap_thresh (float): minimum horizontal overlap ratio to merge (0-1).
+            max_gap_pct (float): maximum horizontal gap as percentage of average width (e.g., 0.5 = 50%).
         
         Returns:
             merged_boxes_xywh (Tensor): merged boxes in xywh format.
@@ -85,55 +87,152 @@ class ModelHandler(BaseHandler):
 
         # Sort boxes by y_center to process line by line
         sort_idx = np.argsort(y_centers)
-        x1 = x1[sort_idx]
-        x2 = x2[sort_idx]
-        y1 = y1[sort_idx]
-        y2 = y2[sort_idx]
-        y_centers = y_centers[sort_idx]
-
+        indices = np.arange(len(boxes))
+        indices = indices[sort_idx]
+        
         merged = []
         used = set()
 
+        def calculate_horizontal_overlap(box1_idx, box2_idx):
+            """Calculate horizontal overlap ratio between two boxes"""
+            x1_start, x1_end = x1[box1_idx], x2[box1_idx]
+            x2_start, x2_end = x1[box2_idx], x2[box2_idx]
+            
+            # Calculate overlap
+            overlap_start = max(x1_start, x2_start)
+            overlap_end = min(x1_end, x2_end)
+            overlap = max(0, overlap_end - overlap_start)
+            
+            # Calculate overlap ratio relative to smaller box width
+            width1 = x1_end - x1_start
+            width2 = x2_end - x2_start
+            min_width = min(width1, width2)
+            
+            return overlap / min_width if min_width > 0 else 0
+
+        def calculate_horizontal_gap(box1_idx, box2_idx):
+            """Calculate horizontal gap between two boxes"""
+            x1_start, x1_end = x1[box1_idx], x2[box1_idx]
+            x2_start, x2_end = x1[box2_idx], x2[box2_idx]
+            
+            # Calculate gap (negative if overlapping)
+            if x1_end < x2_start:  # box1 is to the left of box2
+                return x2_start - x1_end
+            elif x2_end < x1_start:  # box2 is to the left of box1
+                return x1_start - x2_end
+            else:  # boxes overlap
+                return 0
+
+        def boxes_on_same_line(idx1, idx2):
+            """Check if two boxes are on the same horizontal line"""
+            # Calculate y_threshold based on average height of the two boxes
+            avg_height = (heights[idx1] + heights[idx2]) / 2
+            y_thresh_pixels = y_thresh_pct * avg_height
+            
+            # Check y-center alignment
+            y_diff = abs(y_centers[idx1] - y_centers[idx2])
+            if y_diff > y_thresh_pixels:
+                return False
+            
+            # Check vertical overlap (boxes should overlap vertically to be on same line)
+            y1_start, y1_end = y1[idx1], y2[idx1]
+            y2_start, y2_end = y1[idx2], y2[idx2]
+            
+            vertical_overlap_start = max(y1_start, y2_start)
+            vertical_overlap_end = min(y1_end, y2_end)
+            vertical_overlap = max(0, vertical_overlap_end - vertical_overlap_start)
+            
+            # Require at least 30% vertical overlap
+            min_height = min(heights[idx1], heights[idx2])
+            if vertical_overlap < 0.3 * min_height:
+                return False
+            
+            return True
+
+        def should_merge_boxes(box1_idx, box2_idx):
+            """Check if two boxes should be merged based on overlap or proximity"""
+            overlap_ratio = calculate_horizontal_overlap(box1_idx, box2_idx)
+            
+            # Merge if there's any overlap
+            if overlap_ratio >= horizontal_overlap_thresh:
+                return True
+            
+            # Calculate max_gap based on average width of the two boxes
+            avg_width = (widths[box1_idx] + widths[box2_idx]) / 2
+            max_gap_pixels = max_gap_pct * avg_width
+            
+            # Merge if gap is small enough
+            gap = calculate_horizontal_gap(box1_idx, box2_idx)
+            if gap <= max_gap_pixels:
+                return True
+            
+            return False
+
+        # Process each box
         for i in range(len(boxes)):
-            if i in used:
+            idx_i = indices[i]
+            if idx_i in used:
                 continue
 
-            # Start new line
-            current_line = [i]
-            used.add(i)
-            current_y = y_centers[i]
+            # Start new line group
+            current_line = [idx_i]
+            used.add(idx_i)
 
-            # Find all boxes in same line
-            for j in range(i + 1, len(boxes)):
-                if j in used:
-                    continue
+            # Iteratively expand the line by finding boxes that should merge
+            changed = True
+            while changed:
+                changed = False
+                candidates = []
+                
+                # Find all unused boxes that are on the same line as any box in current_line
+                for j in range(len(boxes)):
+                    idx_j = indices[j]
+                    if idx_j in used:
+                        continue
                     
-                # Check if box is in same line using center distance
-                if abs(y_centers[j] - current_y) <= y_thresh:
-                    # Check horizontal gap with closest box in current line
-                    gaps = [x1[j] - x2[k] for k in current_line]
-                    min_gap = min(gaps)
+                    # Check if on same line with any box in current line
+                    for existing_idx in current_line:
+                        if boxes_on_same_line(existing_idx, idx_j):
+                            candidates.append((x1[idx_j], idx_j))
+                            break
+                
+                # Sort candidates by x-coordinate
+                candidates.sort()
+                
+                # Try to add candidates that should merge
+                for _, idx_j in candidates:
+                    if idx_j in used:
+                        continue
                     
-                    if min_gap <= x_gap_thresh:
-                        current_line.append(j)
-                        used.add(j)
+                    # Check if this box should merge with ANY box in current line
+                    should_merge = False
+                    for existing_idx in current_line:
+                        if should_merge_boxes(existing_idx, idx_j):
+                            should_merge = True
+                            break
+                    
+                    if should_merge:
+                        current_line.append(idx_j)
+                        used.add(idx_j)
+                        changed = True  # Keep iterating to catch boxes that connect through this new box
 
-            # Create merged box for the line
+            # Create merged box for the line - preserve original height
             x_min = min(x1[k] for k in current_line)
             x_max = max(x2[k] for k in current_line)
-            # Use the average y coordinates of boxes in line
-            y_min = np.mean([y1[k] for k in current_line])
-            y_max = np.mean([y2[k] for k in current_line])
+            
+            # For y-coordinates, use the min/max to preserve line height
+            y_min_val = min(y1[k] for k in current_line)
+            y_max_val = max(y2[k] for k in current_line)
 
-            merged.append([x_min, y_min, x_max, y_max])
+            merged.append([x_min, y_min_val, x_max, y_max_val])
 
         # Convert merged xyxy -> xywh
         merged_xywh = []
-        for x1, y1, x2, y2 in merged:
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            w = x2 - x1
-            h = y2 - y1
+        for x1_m, y1_m, x2_m, y2_m in merged:
+            cx = (x1_m + x2_m) / 2
+            cy = (y1_m + y2_m) / 2
+            w = x2_m - x1_m
+            h = y2_m - y1_m
             merged_xywh.append([cx, cy, w, h])
 
         return torch.tensor(merged_xywh, dtype=bboxes_xywh.dtype, device=bboxes_xywh.device)
