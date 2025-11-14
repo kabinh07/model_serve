@@ -3,8 +3,8 @@ set -e
 CONTAINER=pytorch/torchserve:latest-cpu
 MODEL=text_detection.pt
 NAME=text_detection_yolo
-VERSION=$3
-EXTRA=$4
+VERSION=$1
+EXTRA=$2
 if [ $EXTRA ]; then
     EXTRA="--extra-files ${EXTRA}"
     else EXTRA="--extra-files ./models"
