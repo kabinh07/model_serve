@@ -2,11 +2,9 @@ import base64
 import os
 import sys
 from io import BytesIO
-from typing import List, Any
 
 import numpy as np
 import torch
-import torchvision
 from torchvision.transforms import v2
 from PIL import Image, ImageDraw
 import cv2
@@ -54,8 +52,7 @@ class ModelHandler(BaseHandler):
     def preprocess(self, data):
         data = data[0].get("body") or data[0].get("data")
         img = data.get("img")
-        # self.threshold = data.get("conf", 0.5)
-        self.threshold = 0.5
+        self.threshold = data.get("conf", 0.5)
         split = img.strip().split(',')
         if len(split) < 2:
             raise PredictionException("Invalid image", 513)
@@ -252,119 +249,11 @@ class ModelHandler(BaseHandler):
 
         return torch.tensor(merged_xywh, dtype=bboxes_xywh.dtype, device=bboxes_xywh.device)
     
-    def xywh2xyxy(self, x):
-        """
-        Convert bounding box format from [x_center, y_center, width, height] to [x1, y1, x2, y2]
-        """
-        y = x.clone() if isinstance(x, torch.Tensor) else torch.tensor(x)
-        y[..., 0] = x[..., 0] - x[..., 2] / 2  # x1 = cx - w/2
-        y[..., 1] = x[..., 1] - x[..., 3] / 2  # y1 = cy - h/2
-        y[..., 2] = x[..., 0] + x[..., 2] / 2  # x2 = cx + w/2
-        y[..., 3] = x[..., 1] + x[..., 3] / 2  # y2 = cy + h/2
-        return y
-    
-    def non_max_suppression(
-            self,
-            prediction,
-            conf_thres=0.25,
-            iou_thres=0.45,
-            classes=None,
-            agnostic=False,
-            max_det=300,
-            max_nms=30000,
-            max_wh=7680,
-            output_xywh=False,
-        ):
-        """
-        Non-Maximum Suppression (NMS) matching YOLO's implementation
-        
-        Args:
-            prediction: Tensor of shape [batch, 6, num_anchors] where:
-                        channels are [x_center, y_center, width, height, class0_score, class1_score, ...]
-            conf_thres: Confidence threshold
-            iou_thres: IoU threshold for NMS
-            classes: Filter by class (None = all classes)
-            agnostic: Class-agnostic NMS
-            max_det: Maximum detections per image
-            max_nms: Maximum boxes into NMS
-            max_wh: Maximum box width/height
-            output_xywh: If True, output boxes in xywh format instead of xyxy
-        
-        Returns:
-            List of detections per image, each of shape [num_det, 6] = [x, y, w, h, conf, class] or [x1, y1, x2, y2, conf, class]
-        """
-        
-        if isinstance(prediction, (list, tuple)):
-            prediction = prediction[0]
-        
-        # Transpose from [batch, 6, num_anchors] to [batch, num_anchors, 6]
-        if prediction.shape[1] < prediction.shape[2]:
-            prediction = prediction.transpose(1, 2)
-        
-        bs = prediction.shape[0]  # batch size
-        nc = prediction.shape[2] - 4  # number of classes
-        
-        # Get candidates: boxes where max class score > conf_thres
-        xc = prediction[:, :, 4:].amax(2) > conf_thres  # [batch, num_boxes]
-        
-        output = [torch.zeros((0, 6), device=prediction.device)] * bs
-        
-        for xi, x in enumerate(prediction):  # per image
-            x = x[xc[xi]]  # filter by confidence
-            
-            if not x.shape[0]:
-                continue
-            
-            # Split into boxes (xywh format) and class scores
-            box = x[:, :4]  # [num_boxes, 4] - xywh format
-            cls = x[:, 4:]  # [num_boxes, num_classes]
-            
-            # Convert boxes from xywh to xyxy for NMS
-            box_xyxy = self.xywh2xyxy(box)
-            
-            # Get best class score and class index
-            conf, j = cls.max(1, keepdim=True)  # [num_boxes, 1]
-            
-            # Filter again by conf_thres
-            filt = conf.view(-1) > conf_thres
-            
-            # Concatenate boxes with conf and class
-            if output_xywh:
-                # Keep original xywh format
-                x = torch.cat((box, conf, j.float()), 1)[filt]
-            else:
-                # Use xyxy format
-                x = torch.cat((box_xyxy, conf, j.float()), 1)[filt]
-            
-            n = x.shape[0]
-            if not n:
-                continue
-            
-            # Sort by confidence and limit to max_nms
-            if n > max_nms:
-                x = x[x[:, 4].argsort(descending=True)[:max_nms]]
-            
-            # Offset boxes by class (for NMS, use xyxy format)
-            c = x[:, 5:6] * (0 if agnostic else max_wh)
-            if output_xywh:
-                # Convert to xyxy temporarily for NMS
-                boxes_for_nms = self.xywh2xyxy(x[:, :4]) + c
-            else:
-                boxes_for_nms = x[:, :4] + c
-            scores = x[:, 4]
-            
-            i = torchvision.ops.nms(boxes_for_nms, scores, iou_thres)
-            
-            i = i[:max_det]
-            output[xi] = x[i]
-        
-        return output
-
     def postprocess(self, inference_output):
         outputs = np.array([cv2.transpose(inference_output[0].cpu().numpy())])
         rows = outputs.shape[1]
 
-        boxes: list[list[float | Any]] = []
+        boxes = []
         scores = []
         class_ids = []
 
@@ -387,16 +276,16 @@ class ModelHandler(BaseHandler):
             box = boxes[index]
             detections.append([c.item() for c in box])
 
-        resized_img = self.image.resize((640, 160))
-        draw_resized = ImageDraw.Draw(resized_img)
-        for box in detections:
-            xmin, ymin, w, h = box  # box is in (xmin, ymin, w, h) format
-            xmax = int(xmin + w)
-            ymax = int(ymin + h)
-            xmin = int(xmin)
-            ymin = int(ymin)
-            draw_resized.rectangle([(xmin, ymin), (xmax, ymax)], outline="green", width=2)
-        resized_img.save("debug_resized_raw_boxes.png")
+        # resized_img = self.image.resize((640, 160))
+        # draw_resized = ImageDraw.Draw(resized_img)
+        # for box in detections:
+        #     xmin, ymin, w, h = box  # box is in (xmin, ymin, w, h) format
+        #     xmax = int(xmin + w)
+        #     ymax = int(ymin + h)
+        #     xmin = int(xmin)
+        #     ymin = int(ymin)
+        #     draw_resized.rectangle([(xmin, ymin), (xmax, ymax)], outline="green", width=2)
+        # resized_img.save("debug_resized_raw_boxes.png")
         
         # Convert boxes from (xmin, ymin, w, h) to (x_center, y_center, w, h)
         detections_array = np.array(detections)
@@ -427,18 +316,18 @@ class ModelHandler(BaseHandler):
         if len(xywh) == 0:
             return [[{"horizontal_list": []}]]
         
-        # Debug image save
-        img_copy = self.image.copy()
-        draw = ImageDraw.Draw(img_copy)
-        xywh_np = xywh.cpu().numpy()
-        for idx, box in enumerate(xywh_np):
-            x_center, y_center, w, h = box
-            xmin = int(x_center - w / 2)
-            ymin = int(y_center - h / 2)
-            xmax = int(x_center + w / 2)
-            ymax = int(y_center + h / 2)
-            draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
-        img_copy.save("debug_before_merge.png")
+        # # Debug image save
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # xywh_np = xywh.cpu().numpy()
+        # for idx, box in enumerate(xywh_np):
+        #     x_center, y_center, w, h = box
+        #     xmin = int(x_center - w / 2)
+        #     ymin = int(y_center - h / 2)
+        #     xmax = int(x_center + w / 2)
+        #     ymax = int(y_center + h / 2)
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
+        # img_copy.save("debug_before_merge.png")
         
         # Merge horizontally aligned boxes
         grouped_bboxes = self.merge_horizontally_aligned_boxes(xywh.cpu())
@@ -493,13 +382,13 @@ class ModelHandler(BaseHandler):
         
         bboxes = np.array(sorted_bboxes)
 
-        img_copy = self.image.copy()
-        draw = ImageDraw.Draw(img_copy)
-        for seq_num, box in enumerate(bboxes):
-            xmin, xmax, ymin, ymax = box
-            draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
-            # Draw sequence number at the top-left of the box
-            draw.text((xmin + 5, ymin + 5), str(seq_num), fill="yellow")
-        img_copy.save("debug_after_merge.png")
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # for seq_num, box in enumerate(bboxes):
+        #     xmin, xmax, ymin, ymax = box
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
+        #     # Draw sequence number at the top-left of the box
+        #     draw.text((xmin + 5, ymin + 5), str(seq_num), fill="yellow")
+        # img_copy.save("debug_after_merge.png")
         
         return [[{"horizontal_list": bboxes.tolist()}]]
