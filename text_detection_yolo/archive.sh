@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 CONTAINER=pytorch/torchserve:latest-cpu
-MODEL=text_detection.pt
+MODEL=text_detection_yolo.torchscript
 NAME=text_detection_yolo
 VERSION=$1
 EXTRA=$2

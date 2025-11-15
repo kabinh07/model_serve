@@ -2,18 +2,16 @@ import base64
 import os
 import sys
 from io import BytesIO
-from typing import List, Any
 
 import numpy as np
 import torch
-import torchvision
-from torchvision.transforms import v2
 from PIL import Image, ImageDraw
-import cv2
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from ts.torch_handler.base_handler import BaseHandler
 from ts.utils.util import PredictionException
+
+from ultralytics import YOLO
 
 
 class ModelHandler(BaseHandler):
@@ -21,7 +19,7 @@ class ModelHandler(BaseHandler):
         super().__init__()
         self.predictor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.mapping = ["words", "lines"]
+        self.processor = None
         self.initialized = False
         self.manifest = None
 
@@ -30,43 +28,30 @@ class ModelHandler(BaseHandler):
         properties = context.system_properties
         model_dir = properties.get("model_dir")
         serialized_file = self.manifest['model']['serializedFile']
-        model_pt_path = os.path.join(model_dir, serialized_file)
-        if not os.path.isfile(model_pt_path):
-            raise RuntimeError("Missing the model.pt file")
-
-        self.model = torch.jit.load(model_pt_path, map_location=self.device)
-        print("Model loaded")
+        self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+        self.predictor = YOLO(os.path.join(model_dir, serialized_file))
         self.initialized = True
 
     def handle(self, data, context):
-        """
-        Invoke by TorchServe for prediction request.
-        Do pre-processing of data, prediction using model and postprocessing of prediction output
-        :param data: Input data for prediction
-        :param context: Initial context contains model server system properties.
-        :return: prediction output
-        """
-        data = self.preprocess(data)
-        with torch.no_grad():
-            results = self.model(data)
-            return self.postprocess(results)
+        img, conf = self.preprocess(data)
+        result = self.inference(img, conf)
+        return self.postprocess(result)
+
+    def inference(self, model_input, conf):
+        self.image = model_input
+        predictions = self.predictor.predict(model_input, conf = conf, save =False, device=self.device)
+        return predictions
 
     def preprocess(self, data):
         data = data[0].get("body") or data[0].get("data")
         img = data.get("img")
-        # self.threshold = data.get("conf", 0.5)
-        self.threshold = 0.5
+        conf = data.get("conf", 0.5)
         split = img.strip().split(',')
         if len(split) < 2:
             raise PredictionException("Invalid image", 513)
         img = Image.open(BytesIO(base64.b64decode(split[1]))).convert("RGB")
-        self.image = img
-        self.original_shape = img.size  # (W, H)
-        transform = v2.Compose([v2.Resize((160, 640)), v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
-        img = transform(img)
-        image_tensor = torch.tensor(img.clone().detach().to(self.device)).unsqueeze(0)
-        return image_tensor
-        
+
+        return img, conf
     
     def merge_horizontally_aligned_boxes(self, bboxes_xywh, y_thresh_pct=0.3, horizontal_overlap_thresh=0.05, max_gap_pct=0.5):
         """
@@ -251,194 +236,30 @@ class ModelHandler(BaseHandler):
             merged_xywh.append([cx, cy, w, h])
 
         return torch.tensor(merged_xywh, dtype=bboxes_xywh.dtype, device=bboxes_xywh.device)
-    
-    def xywh2xyxy(self, x):
-        """
-        Convert bounding box format from [x_center, y_center, width, height] to [x1, y1, x2, y2]
-        """
-        y = x.clone() if isinstance(x, torch.Tensor) else torch.tensor(x)
-        y[..., 0] = x[..., 0] - x[..., 2] / 2  # x1 = cx - w/2
-        y[..., 1] = x[..., 1] - x[..., 3] / 2  # y1 = cy - h/2
-        y[..., 2] = x[..., 0] + x[..., 2] / 2  # x2 = cx + w/2
-        y[..., 3] = x[..., 1] + x[..., 3] / 2  # y2 = cy + h/2
-        return y
-    
-    def non_max_suppression(
-            self,
-            prediction,
-            conf_thres=0.25,
-            iou_thres=0.45,
-            classes=None,
-            agnostic=False,
-            max_det=300,
-            max_nms=30000,
-            max_wh=7680,
-            output_xywh=False,
-        ):
-        """
-        Non-Maximum Suppression (NMS) matching YOLO's implementation
-        
-        Args:
-            prediction: Tensor of shape [batch, 6, num_anchors] where:
-                        channels are [x_center, y_center, width, height, class0_score, class1_score, ...]
-            conf_thres: Confidence threshold
-            iou_thres: IoU threshold for NMS
-            classes: Filter by class (None = all classes)
-            agnostic: Class-agnostic NMS
-            max_det: Maximum detections per image
-            max_nms: Maximum boxes into NMS
-            max_wh: Maximum box width/height
-            output_xywh: If True, output boxes in xywh format instead of xyxy
-        
-        Returns:
-            List of detections per image, each of shape [num_det, 6] = [x, y, w, h, conf, class] or [x1, y1, x2, y2, conf, class]
-        """
-        
-        if isinstance(prediction, (list, tuple)):
-            prediction = prediction[0]
-        
-        # Transpose from [batch, 6, num_anchors] to [batch, num_anchors, 6]
-        if prediction.shape[1] < prediction.shape[2]:
-            prediction = prediction.transpose(1, 2)
-        
-        bs = prediction.shape[0]  # batch size
-        nc = prediction.shape[2] - 4  # number of classes
-        
-        # Get candidates: boxes where max class score > conf_thres
-        xc = prediction[:, :, 4:].amax(2) > conf_thres  # [batch, num_boxes]
-        
-        output = [torch.zeros((0, 6), device=prediction.device)] * bs
-        
-        for xi, x in enumerate(prediction):  # per image
-            x = x[xc[xi]]  # filter by confidence
-            
-            if not x.shape[0]:
-                continue
-            
-            # Split into boxes (xywh format) and class scores
-            box = x[:, :4]  # [num_boxes, 4] - xywh format
-            cls = x[:, 4:]  # [num_boxes, num_classes]
-            
-            # Convert boxes from xywh to xyxy for NMS
-            box_xyxy = self.xywh2xyxy(box)
-            
-            # Get best class score and class index
-            conf, j = cls.max(1, keepdim=True)  # [num_boxes, 1]
-            
-            # Filter again by conf_thres
-            filt = conf.view(-1) > conf_thres
-            
-            # Concatenate boxes with conf and class
-            if output_xywh:
-                # Keep original xywh format
-                x = torch.cat((box, conf, j.float()), 1)[filt]
-            else:
-                # Use xyxy format
-                x = torch.cat((box_xyxy, conf, j.float()), 1)[filt]
-            
-            n = x.shape[0]
-            if not n:
-                continue
-            
-            # Sort by confidence and limit to max_nms
-            if n > max_nms:
-                x = x[x[:, 4].argsort(descending=True)[:max_nms]]
-            
-            # Offset boxes by class (for NMS, use xyxy format)
-            c = x[:, 5:6] * (0 if agnostic else max_wh)
-            if output_xywh:
-                # Convert to xyxy temporarily for NMS
-                boxes_for_nms = self.xywh2xyxy(x[:, :4]) + c
-            else:
-                boxes_for_nms = x[:, :4] + c
-            scores = x[:, 4]
-            
-            i = torchvision.ops.nms(boxes_for_nms, scores, iou_thres)
-            
-            i = i[:max_det]
-            output[xi] = x[i]
-        
-        return output
 
-    def postprocess(self, inference_output):
-        outputs = np.array([cv2.transpose(inference_output[0].cpu().numpy())])
-        rows = outputs.shape[1]
 
-        boxes: list[list[float | Any]] = []
-        scores = []
-        class_ids = []
+    def postprocess(self, predictions):
+        # Get xywh boxes and ensure they're on the right device
+        xywh = predictions[0].boxes.xywh.to(self.device)
+        if len(xywh.shape) == 3:
+            xywh = xywh[0]
 
-        for i in range(rows):
-            classes_scores = outputs[0][i][4:]
-            (minScore, maxScore, minClassLoc, (x, maxClassIndex)) = cv2.minMaxLoc(classes_scores)
-            if maxScore >= self.threshold:
-                box = [
-                    outputs[0][i][0] - (0.5 * outputs[0][i][2]), outputs[0][i][1] - (0.5 * outputs[0][i][3]),
-                    outputs[0][i][2], outputs[0][i][3]]
-                boxes.append(box)
-                scores.append(maxScore)
-                class_ids.append(maxClassIndex)
-
-        result_boxes = cv2.dnn.NMSBoxes(boxes, scores, self.threshold, 0.85, 0.5)
-
-        detections = []
-        for i in range(len(result_boxes)):
-            index = result_boxes[i]
-            box = boxes[index]
-            detections.append([c.item() for c in box])
-
-        resized_img = self.image.resize((640, 160))
-        draw_resized = ImageDraw.Draw(resized_img)
-        for box in detections:
-            xmin, ymin, w, h = box  # box is in (xmin, ymin, w, h) format
-            xmax = int(xmin + w)
-            ymax = int(ymin + h)
-            xmin = int(xmin)
-            ymin = int(ymin)
-            draw_resized.rectangle([(xmin, ymin), (xmax, ymax)], outline="green", width=2)
-        resized_img.save("debug_resized_raw_boxes.png")
-        
-        # Convert boxes from (xmin, ymin, w, h) to (x_center, y_center, w, h)
-        detections_array = np.array(detections)
-        detections_xywh = detections_array.copy()
-        detections_xywh[:, 0] = detections_array[:, 0] + detections_array[:, 2] / 2  # x_center = xmin + w/2
-        detections_xywh[:, 1] = detections_array[:, 1] + detections_array[:, 3] / 2  # y_center = ymin + h/2
-        # w and h stay the same (columns 2 and 3)
-        
-        # Scale boxes back to original image size
-        scale_x = self.original_shape[0] / 640
-        scale_y = self.original_shape[1] / 160
-
-        print(f"Original image size (W, H): {self.original_shape}")
-        print(f"Resized image size: (640, 160)")
-        print(f"Scale factors - X: {scale_x:.4f}, Y: {scale_y:.4f}")
-        print(f"Sample box before scaling (xywh): {detections_xywh[0][:4]}")
-        
-        detections_scaled = detections_xywh.copy()
-        detections_scaled[:, 0] *= scale_x
-        detections_scaled[:, 1] *= scale_y
-        detections_scaled[:, 2] *= scale_x
-        detections_scaled[:, 3] *= scale_y
-        
-        print(f"Sample box after scaling (xywh): {detections_scaled[0][:4]}")
-
-        xywh = torch.tensor(detections_scaled)
-
+        # Skip merging if no boxes detected
         if len(xywh) == 0:
             return [[{"horizontal_list": []}]]
         
-        # Debug image save
-        img_copy = self.image.copy()
-        draw = ImageDraw.Draw(img_copy)
-        xywh_np = xywh.cpu().numpy()
-        for idx, box in enumerate(xywh_np):
-            x_center, y_center, w, h = box
-            xmin = int(x_center - w / 2)
-            ymin = int(y_center - h / 2)
-            xmax = int(x_center + w / 2)
-            ymax = int(y_center + h / 2)
-            draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
-        img_copy.save("debug_before_merge.png")
+        # # Debug image save
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # xywh_np = xywh.cpu().numpy()
+        # for idx, box in enumerate(xywh_np):
+        #     x_center, y_center, w, h = box
+        #     xmin = int(x_center - w / 2)
+        #     ymin = int(y_center - h / 2)
+        #     xmax = int(x_center + w / 2)
+        #     ymax = int(y_center + h / 2)
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="blue", width=1)
+        # img_copy.save("debug_before_merge.png")
         
         # Merge horizontally aligned boxes
         grouped_bboxes = self.merge_horizontally_aligned_boxes(xywh.cpu())
@@ -493,13 +314,13 @@ class ModelHandler(BaseHandler):
         
         bboxes = np.array(sorted_bboxes)
 
-        img_copy = self.image.copy()
-        draw = ImageDraw.Draw(img_copy)
-        for seq_num, box in enumerate(bboxes):
-            xmin, xmax, ymin, ymax = box
-            draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
-            # Draw sequence number at the top-left of the box
-            draw.text((xmin + 5, ymin + 5), str(seq_num), fill="yellow")
-        img_copy.save("debug_after_merge.png")
+        # img_copy = self.image.copy()
+        # draw = ImageDraw.Draw(img_copy)
+        # for seq_num, box in enumerate(bboxes):
+        #     xmin, xmax, ymin, ymax = box
+        #     draw.rectangle([(xmin, ymin), (xmax, ymax)], outline="red", width=2)
+        #     # Draw sequence number at the top-left of the box
+        #     draw.text((xmin + 5, ymin + 5), str(seq_num), fill="yellow")
+        # img_copy.save("debug_after_merge.png")
         
         return [[{"horizontal_list": bboxes.tolist()}]]
