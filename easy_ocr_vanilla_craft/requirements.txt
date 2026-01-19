@@ -1,0 +1,6 @@
+easyocr
+opencv-python-headless
+torch==2.7.1
+torchvision==0.22.1
+numpy
+Pillow

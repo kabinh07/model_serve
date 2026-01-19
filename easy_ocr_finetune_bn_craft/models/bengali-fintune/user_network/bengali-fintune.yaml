@@ -1,0 +1,10 @@
+network_params:
+  input_channel: 1
+  output_channel: 512
+  hidden_size: 256
+imgH: 32
+imgW: 200
+num_fiducial: 20 
+lang_list:
+         - 'bn'
+character_list: "  !\"#'(),-./:;=?।ঁংঃঅআইঈউঊঋএঐওকখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহ়ািীুূৃেৈোৌ্ৎ০১২৩৪৫৬৭৮৯‌‍"

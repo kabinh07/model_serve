@@ -1,2 +1,2 @@
-capybara_docsaid>=0.5.1
-opencv-python
+capybara_docsaid==0.12.0
+opencv-python-headless==4.7.0.72

@@ -1,5 +1,5 @@
-opencv-python
+opencv-python-headless==4.13.0.90
 scipy
-pillow
+pillow==12.1.0
 gdown>=3.10.1
 tf-keras

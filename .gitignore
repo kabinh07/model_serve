@@ -6,3 +6,4 @@ text_detection_yolo/models/*
 *.png
 *.h5
 *.onnx
+*.pth
